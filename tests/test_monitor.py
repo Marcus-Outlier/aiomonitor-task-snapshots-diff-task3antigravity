@@ -286,3 +286,47 @@ async def test_custom_monitor_command(monitor: Monitor):
 
     resp = await invoke_command(monitor, ["something", "someargument"])
     assert "doing something with someargument" in resp
+
+
+@pytest.mark.asyncio
+async def test_snapshots(event_loop):
+    async def sleeper():
+        await asyncio.sleep(100)
+
+    async def short_task():
+        await asyncio.sleep(0.01)
+
+    with Monitor(event_loop, console_enabled=False, hook_task_factory=True) as mon:
+        t1 = asyncio.create_task(sleeper(), name="sleeper_task")
+        t2 = asyncio.create_task(short_task(), name="short_task")
+        await t2
+        await asyncio.sleep(0.05)  # allow termination queue to process
+
+        sid0 = await mon.capture_snapshot("first")
+        assert sid0 == 0
+        snap0 = mon.get_snapshot(sid0)
+        assert snap0.snapshot_id == 0
+        assert snap0.name == "first"
+        assert any(t.name == "sleeper_task" for t in snap0.running_tasks)
+        assert any(t.name == "short_task" for t in snap0.terminated_tasks)
+
+        t1.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await t1
+        await asyncio.sleep(0.05)
+
+        sid1 = await mon.capture_snapshot()
+        assert sid1 == 1
+        snap1 = mon.get_snapshot(sid1)
+        assert snap1.name is None
+        assert not any(t.name == "sleeper_task" for t in snap1.running_tasks)
+        assert any(t.name == "sleeper_task" for t in snap1.terminated_tasks)
+        # Ensure snap0 was frozen and didn't change
+        assert any(t.name == "sleeper_task" for t in snap0.running_tasks)
+        assert not any(t.name == "sleeper_task" for t in snap0.terminated_tasks)
+
+        mon.delete_snapshot(sid0)
+        with pytest.raises(KeyError):
+            mon.get_snapshot(sid0)
+        with pytest.raises(KeyError):
+            mon.delete_snapshot(sid0)

@@ -33,7 +33,7 @@ import janus
 from aiohttp import web
 from prompt_toolkit.contrib.telnet.server import TelnetServer
 
-from .exceptions import MissingTask
+from .exceptions import MissingSnapshot, MissingTask
 from .task import TracedTask, persistent_coro
 from .termui.commands import interact
 from .types import (
@@ -42,6 +42,7 @@ from .types import (
     FormattedLiveTaskInfo,
     FormattedStackItem,
     FormattedTerminatedTaskInfo,
+    TaskSnapshot,
     TerminatedTaskInfo,
 )
 from .utils import (
@@ -110,6 +111,8 @@ class Monitor:
     _canceller_chain: Dict[str, str]
     _canceller_stacks: Dict[str, List[traceback.FrameSummary] | None]
     _cancellation_chain_queue: janus.Queue[CancellationChain]
+    _snapshots: Dict[int, TaskSnapshot]
+    _next_snapshot_id: int
 
     def __init__(
         self,
@@ -157,6 +160,8 @@ class Monitor:
         self._canceller_stacks = {}
         self._terminated_history = []
         self._max_termination_history = max_termination_history
+        self._snapshots = {}
+        self._next_snapshot_id = 0
 
         self._ui_started = threading.Event()
         self._ui_thread = threading.Thread(target=self._ui_main, args=(), daemon=True)
@@ -313,6 +318,60 @@ class Monitor:
                 )
             )
         return tasks
+
+    async def capture_snapshot(self, name: Optional[str] = None) -> int:
+        async def _capture() -> tuple[
+            Sequence[FormattedLiveTaskInfo],
+            Sequence[FormattedTerminatedTaskInfo],
+            Dict[str, TerminatedTaskInfo],
+        ]:
+            running = list(self.format_running_task_list("", False))
+            terminated = list(self.format_terminated_task_list("", False))
+            raw_terminated = dict(self._terminated_tasks)
+            return running, terminated, raw_terminated
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if self._monitored_loop == running_loop or not self._monitored_loop.is_running():
+            running_tasks, terminated_tasks, raw_terminated_tasks = await _capture()
+        else:
+            fut = asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(_capture(), loop=self._monitored_loop)
+            )
+            running_tasks, terminated_tasks, raw_terminated_tasks = await fut
+
+        snapshot_id = self._next_snapshot_id
+        self._next_snapshot_id += 1
+        snapshot = TaskSnapshot(
+            snapshot_id=snapshot_id,
+            name=name,
+            created_at=time.time(),
+            running_tasks=running_tasks,
+            terminated_tasks=terminated_tasks,
+            raw_terminated_tasks=raw_terminated_tasks,
+        )
+        self._snapshots[snapshot_id] = snapshot
+        return snapshot_id
+
+    def get_snapshot(self, snapshot_id: int | str) -> TaskSnapshot:
+        sid = int(snapshot_id)
+        try:
+            return self._snapshots[sid]
+        except KeyError as e:
+            raise MissingSnapshot(sid) from e
+
+    def delete_snapshot(self, snapshot_id: int | str) -> None:
+        sid = int(snapshot_id)
+        try:
+            del self._snapshots[sid]
+        except KeyError as e:
+            raise MissingSnapshot(sid) from e
+
+    def list_snapshots(self) -> Sequence[TaskSnapshot]:
+        return [self._snapshots[k] for k in sorted(self._snapshots.keys())]
 
     async def cancel_monitored_task(self, task_id: str | int) -> str:
         task_id_ = int(task_id)
