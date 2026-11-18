@@ -42,6 +42,8 @@ from .types import (
     FormattedLiveTaskInfo,
     FormattedStackItem,
     FormattedTerminatedTaskInfo,
+    SnapshotDiff,
+    SnapshotSummary,
     TaskSnapshot,
     TerminatedTaskInfo,
 )
@@ -112,7 +114,9 @@ class Monitor:
     _canceller_stacks: Dict[str, List[traceback.FrameSummary] | None]
     _cancellation_chain_queue: janus.Queue[CancellationChain]
     _snapshots: Dict[int, TaskSnapshot]
+    _snapshot_history: List[int]
     _next_snapshot_id: int
+    _max_snapshots: int
 
     def __init__(
         self,
@@ -125,6 +129,7 @@ class Monitor:
         console_enabled: bool = True,
         hook_task_factory: bool = False,
         max_termination_history: int = 1000,
+        max_snapshots: int = 100,
         locals: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._monitored_loop = loop or asyncio.get_running_loop()
@@ -161,7 +166,9 @@ class Monitor:
         self._terminated_history = []
         self._max_termination_history = max_termination_history
         self._snapshots = {}
+        self._snapshot_history = []
         self._next_snapshot_id = 0
+        self._max_snapshots = max_snapshots
 
         self._ui_started = threading.Event()
         self._ui_thread = threading.Thread(target=self._ui_main, args=(), daemon=True)
@@ -354,6 +361,10 @@ class Monitor:
             raw_terminated_tasks=raw_terminated_tasks,
         )
         self._snapshots[snapshot_id] = snapshot
+        self._snapshot_history.append(snapshot_id)
+        while len(self._snapshot_history) > self._max_snapshots:
+            removed_id = self._snapshot_history.pop(0)
+            self._snapshots.pop(removed_id, None)
         return snapshot_id
 
     def get_snapshot(self, snapshot_id: int | str) -> TaskSnapshot:
@@ -369,9 +380,52 @@ class Monitor:
             del self._snapshots[sid]
         except KeyError as e:
             raise MissingSnapshot(sid) from e
+        with contextlib.suppress(ValueError):
+            self._snapshot_history.remove(sid)
 
-    def list_snapshots(self) -> Sequence[TaskSnapshot]:
-        return [self._snapshots[k] for k in sorted(self._snapshots.keys())]
+    def list_snapshots(self) -> Sequence[SnapshotSummary]:
+        return [
+            self._snapshots[k].summary
+            for k in sorted(self._snapshots.keys())
+        ]
+
+    def diff_snapshots(
+        self,
+        from_snapshot_id: int | str,
+        to_snapshot_id: Optional[int | str] = None,
+    ) -> SnapshotDiff:
+        snap_a = self.get_snapshot(from_snapshot_id)
+        if to_snapshot_id is not None:
+            snap_b = self.get_snapshot(to_snapshot_id)
+            to_id: Optional[int] = snap_b.snapshot_id
+            b_running = snap_b.running_tasks
+            b_terminated = snap_b.terminated_tasks
+        else:
+            to_id = None
+            b_running = self.format_running_task_list("", False)
+            b_terminated = self.format_terminated_task_list("", False)
+
+        a_running_by_id = {t.task_id: t for t in snap_a.running_tasks}
+        b_running_by_id = {t.task_id: t for t in b_running}
+        a_terminated_ids = {t.task_id for t in snap_a.terminated_tasks}
+
+        new_running = [t for t in b_running if t.task_id not in a_running_by_id]
+        still_running = [t for t in b_running if t.task_id in a_running_by_id]
+        finished_running = [
+            t for t in snap_a.running_tasks if t.task_id not in b_running_by_id
+        ]
+        new_terminated = [
+            t for t in b_terminated if t.task_id not in a_terminated_ids
+        ]
+
+        return SnapshotDiff(
+            from_snapshot_id=snap_a.snapshot_id,
+            to_snapshot_id=to_id,
+            new_running_tasks=new_running,
+            still_running_tasks=still_running,
+            finished_running_tasks=finished_running,
+            new_terminated_tasks=new_terminated,
+        )
 
     async def cancel_monitored_task(self, task_id: str | int) -> str:
         task_id_ = int(task_id)
@@ -484,7 +538,11 @@ class Monitor:
     ) -> Sequence[FormattedStackItem]:
         depth = 0
         tinfo_chain: List[TerminatedTaskInfo] = []
+        if trace_id not in self._terminated_tasks:
+            raise MissingTask(trace_id)
         while trace_id is not None:
+            if trace_id not in self._terminated_tasks:
+                break
             tinfo_chain.append(self._terminated_tasks[trace_id])
             trace_id = self._canceller_chain.get(trace_id)  # type: ignore
         prev_tinfo = None
@@ -695,6 +753,7 @@ def start_monitor(
     console_enabled: bool = True,
     hook_task_factory: bool = False,
     max_termination_history: Optional[int] = None,
+    max_snapshots: Optional[int] = None,
     locals: Optional[Dict[str, Any]] = None,
 ) -> Monitor:
     """
@@ -723,6 +782,11 @@ def start_monitor(
             max_termination_history
             if max_termination_history is not None
             else get_default_args(monitor_cls.__init__)["max_termination_history"]
+        ),
+        max_snapshots=(
+            max_snapshots
+            if max_snapshots is not None
+            else get_default_args(monitor_cls.__init__)["max_snapshots"]
         ),
         locals=locals,
     )

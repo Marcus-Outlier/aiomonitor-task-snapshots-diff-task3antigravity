@@ -330,3 +330,37 @@ async def test_snapshots(event_loop):
             mon.get_snapshot(sid0)
         with pytest.raises(KeyError):
             mon.delete_snapshot(sid0)
+
+        summaries = mon.list_snapshots()
+        assert len(summaries) == 1
+        assert summaries[0].snapshot_id == 1
+        assert summaries[0].name is None
+        assert summaries[0].running_count == len(snap1.running_tasks)
+        assert summaries[0].terminated_count == len(snap1.terminated_tasks)
+        assert summaries[0].termination_count == len(snap1.terminated_tasks)
+
+
+@pytest.mark.asyncio
+async def test_max_snapshots(event_loop):
+    with start_monitor(
+        event_loop,
+        console_enabled=False,
+        hook_task_factory=True,
+        max_snapshots=2,
+    ) as mon:
+        s0 = await mon.capture_snapshot("s0")
+        s1 = await mon.capture_snapshot("s1")
+        s2 = await mon.capture_snapshot("s2")
+        assert (s0, s1, s2) == (0, 1, 2)
+        with pytest.raises(KeyError):
+            mon.get_snapshot(s0)
+        assert [s.snapshot_id for s in mon.list_snapshots()] == [1, 2]
+        diff = mon.diff_snapshots(s1, s2)
+        assert diff.from_snapshot_id == 1
+        assert diff.to_snapshot_id == 2
+        with pytest.raises(KeyError):
+            mon.diff_snapshots(s0, s2)
+        with pytest.raises(KeyError):
+            mon.format_running_task_stack(999999999)
+        with pytest.raises(KeyError):
+            mon.format_terminated_task_stack("nonexistent")
