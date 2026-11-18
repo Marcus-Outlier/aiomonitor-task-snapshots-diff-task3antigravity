@@ -422,3 +422,65 @@ async def test_snapshot_formatting_and_diff(event_loop):
         with contextlib.suppress(asyncio.CancelledError):
             await t2
             await t4
+
+
+@pytest.mark.asyncio
+async def test_snapshot_cli_commands(monitor: Monitor):
+    async def sleeper():
+        await asyncio.sleep(100)
+
+    t1 = monitor._monitored_loop.create_task(sleeper(), name="cli_task_1")
+    await asyncio.sleep(0.05)
+
+    resp = await invoke_command(monitor, ["snapshot", "save", "--name", "first_snap"])
+    assert "0" in resp
+    assert "first_snap" in resp
+
+    t2 = monitor._monitored_loop.create_task(sleeper(), name="cli_task_2")
+    await asyncio.sleep(0.05)
+
+    resp = await invoke_command(monitor, ["snapshot", "save"])
+    assert "1" in resp
+
+    resp = await invoke_command(monitor, ["snapshot", "list"])
+    assert "first_snap" in resp
+    assert "0" in resp
+    assert "1" in resp
+
+    resp = await invoke_command(monitor, ["snapshot", "ls"])
+    assert "first_snap" in resp
+
+    resp = await invoke_command(monitor, ["snapshot", "show", "0"])
+    assert "cli_task_1" in resp
+    assert "cli_task_2" not in resp
+
+    resp = await invoke_command(monitor, ["snapshot", "where", "0", str(id(t1))])
+    assert "Task" in resp
+
+    resp = await invoke_command(monitor, ["snapshot", "where", "0", "999999999"])
+    assert "No task 999999999" in resp
+
+    resp = await invoke_command(monitor, ["snapshot", "diff", "0", "1"])
+    assert "Added" in resp
+    assert "Removed" in resp
+    assert "Common" in resp
+    assert "cli_task_2" in resp
+
+    resp = await invoke_command(monitor, ["snapshot", "delete", "0"])
+    assert "0" in resp
+
+    for subcmd in (
+        ["snapshot", "show", "999"],
+        ["snapshot", "where", "999", str(id(t1))],
+        ["snapshot", "diff", "999", "1"],
+        ["snapshot", "diff", "1", "999"],
+        ["snapshot", "delete", "999"],
+    ):
+        resp = await invoke_command(monitor, subcmd)
+        assert "999" in resp
+
+    t1.cancel()
+    t2.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await t1
+        await t2

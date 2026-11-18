@@ -88,3 +88,41 @@ def complete_signal_names(
     incomplete: str,
 ) -> Iterable[str]:
     return [sig.name for sig in signal.Signals if sig.name.startswith(incomplete)]
+
+
+def complete_snapshot_id(
+    ctx: click.Context,
+    param: click.Parameter,
+    incomplete: str,
+) -> Iterable[str]:
+    try:
+        self: Monitor = current_monitor.get()
+    except LookupError:
+        return []
+    return [
+        snapshot_id
+        for snapshot_id in map(str, sorted(self._snapshots.keys()))
+        if snapshot_id.startswith(incomplete)
+    ][:10]
+
+
+def complete_snapshot_task_id(
+    ctx: click.Context,
+    param: click.Parameter,
+    incomplete: str,
+) -> Iterable[str]:
+    try:
+        self: Monitor = current_monitor.get()
+    except LookupError:
+        return []
+    snapshot_id = ctx.params.get("snapshot_id")
+    if snapshot_id is None:
+        return []
+    try:
+        snap = self.get_snapshot(snapshot_id)
+    except (KeyError, ValueError):
+        return []
+    task_ids = [t.task_id for t in snap.running_tasks] + [
+        t.task_id for t in snap.terminated_tasks
+    ]
+    return [tid for tid in task_ids if tid.startswith(incomplete)][:10]
