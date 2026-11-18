@@ -11,6 +11,7 @@ from typing import Sequence
 
 import click
 import pytest
+from aiohttp import ClientSession
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
@@ -478,6 +479,103 @@ async def test_snapshot_cli_commands(monitor: Monitor):
     ):
         resp = await invoke_command(monitor, subcmd)
         assert "999" in resp
+
+    t1.cancel()
+    t2.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await t1
+        await t2
+
+
+@pytest.mark.asyncio
+async def test_webui_snapshots(monitor: Monitor):
+    async def sleeper():
+        await asyncio.sleep(100)
+
+    t1 = monitor._monitored_loop.create_task(sleeper(), name="web_task_1")
+    await asyncio.sleep(0.05)
+
+    base_url = f"http://{monitor.host}:{monitor._webui_port}"
+    async with ClientSession() as session:
+        async with session.get(f"{base_url}/snapshots") as resp:
+            assert resp.status == 200
+            html = await resp.text()
+            assert "Snapshots" in html
+
+        async with session.post(
+            f"{base_url}/api/snapshots", data={"name": "web_snap_0"}
+        ) as resp:
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["snapshot_id"] == 0
+            assert data["id"] == 0
+
+        t2 = monitor._monitored_loop.create_task(sleeper(), name="web_task_2")
+        await asyncio.sleep(0.05)
+
+        async with session.post(
+            f"{base_url}/jsonapi/api/snapshots/", data={"name": "web_snap_1"}
+        ) as resp:
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["snapshot_id"] == 1
+            assert data["id"] == 1
+
+        async with session.get(f"{base_url}/api/snapshots") as resp:
+            assert resp.status == 200
+            data = await resp.json()
+            assert len(data["snapshots"]) == 2
+            assert data["snapshots"][0]["name"] == "web_snap_0"
+            assert data["snapshots"][1]["name"] == "web_snap_1"
+
+        async with session.post(
+            f"{base_url}/api/snapshots/tasks", data={"snapshot_id": "0"}
+        ) as resp:
+            assert resp.status == 200
+            data = await resp.json()
+            assert any(t["name"] == "web_task_1" for t in data["tasks"])
+            assert not any(t["name"] == "web_task_2" for t in data["tasks"])
+
+        async with session.post(
+            f"{base_url}/api/snapshots/page",
+            data={"snapshot_id": "0", "task_id": str(id(t1))},
+        ) as resp:
+            assert resp.status == 200
+            data = await resp.json()
+            assert len(data["trace"]) >= 2
+
+        async with session.get(
+            f"{base_url}/trace-snapshot",
+            params={"snapshot_id": "0", "task_id": str(id(t1))},
+        ) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            assert "web_task_1" in text
+
+        async with session.post(
+            f"{base_url}/api/snapshots/diff",
+            data={"snapshot_id_1": "0", "snapshot_id_2": "1"},
+        ) as resp:
+            assert resp.status == 200
+            data = await resp.json()
+            assert any(t["name"] == "web_task_2" for t in data["added"])
+            assert any(t["name"] == "web_task_1" for t in data["common"])
+            assert data["removed"] == []
+
+        async with session.delete(
+            f"{base_url}/api/snapshots/", params={"snapshot_id": "0"}
+        ) as resp:
+            assert resp.status == 200
+
+        async with session.delete(
+            f"{base_url}/api/snapshots/", params={"snapshot_id": "0"}
+        ) as resp:
+            assert resp.status == 404
+
+        async with session.post(
+            f"{base_url}/api/snapshots/tasks", data={"snapshot_id": "999"}
+        ) as resp:
+            assert resp.status == 404
 
     t1.cancel()
     t2.cancel()

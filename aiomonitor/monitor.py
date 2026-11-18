@@ -327,7 +327,7 @@ class Monitor:
         return tasks
 
     async def capture_snapshot(self, name: Optional[str] = None) -> int:
-        async def _capture() -> tuple[
+        def _capture_sync() -> tuple[
             Sequence[FormattedLiveTaskInfo],
             Sequence[FormattedTerminatedTaskInfo],
             Dict[str, TerminatedTaskInfo],
@@ -381,11 +381,20 @@ class Monitor:
                 terminated_stacks,
                 persistent_running,
                 persistent_terminated,
-            ) = await _capture()
+            ) = _capture_sync()
         else:
-            fut = asyncio.wrap_future(
-                asyncio.run_coroutine_threadsafe(_capture(), loop=self._monitored_loop)
-            )
+            caller_loop = asyncio.get_running_loop()
+            done_fut = caller_loop.create_future()
+
+            def _run_on_monitored() -> None:
+                try:
+                    res = _capture_sync()
+                except BaseException as exc:
+                    caller_loop.call_soon_threadsafe(done_fut.set_exception, exc)
+                else:
+                    caller_loop.call_soon_threadsafe(done_fut.set_result, res)
+
+            self._monitored_loop.call_soon_threadsafe(_run_on_monitored)
             (
                 running_tasks,
                 terminated_tasks,
@@ -394,7 +403,7 @@ class Monitor:
                 terminated_stacks,
                 persistent_running,
                 persistent_terminated,
-            ) = await fut
+            ) = await done_fut
 
         snapshot_id = self._next_snapshot_id
         self._next_snapshot_id += 1

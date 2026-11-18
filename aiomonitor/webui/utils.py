@@ -22,8 +22,21 @@ async def check_params(
         if request.method in ("GET", "DELETE"):
             data = dict(request.query)
         else:
-            body = await request.post()
-            data = {k: str(v) for k, v in body.items()}
+            if request.content_type == "application/json":
+                try:
+                    raw_json = await request.json()
+                    data = (
+                        {k: str(v) if v is not None else None for k, v in raw_json.items()}
+                        if isinstance(raw_json, dict)
+                        else {}
+                    )
+                except Exception:
+                    data = {}
+            else:
+                body = await request.post()
+                data = {k: str(v) for k, v in body.items()}
+            for k, v in request.query.items():
+                data.setdefault(k, v)
         params = model_class.model_validate(data)
     except ValidationError as e:
         error_messages = []
