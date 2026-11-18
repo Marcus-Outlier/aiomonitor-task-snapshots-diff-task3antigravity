@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, NamedTuple, Optional, Sequence
 
 if sys.version_info >= (3, 11):
@@ -54,7 +54,15 @@ class TaskSnapshot:
     created_at: float
     running_tasks: Sequence[FormattedLiveTaskInfo]
     terminated_tasks: Sequence[FormattedTerminatedTaskInfo]
-    raw_terminated_tasks: Dict[str, TerminatedTaskInfo]
+    raw_terminated_tasks: Dict[str, TerminatedTaskInfo] = field(default_factory=dict)
+    running_task_stacks: Dict[str, Sequence[FormattedStackItem]] = field(
+        default_factory=dict
+    )
+    terminated_task_stacks: Dict[str, Sequence[FormattedStackItem]] = field(
+        default_factory=dict
+    )
+    persistent_running_task_ids: Sequence[str] = field(default_factory=list)
+    persistent_terminated_task_ids: Sequence[str] = field(default_factory=list)
 
     @property
     def id(self) -> int:
@@ -96,28 +104,53 @@ Snapshot = TaskSnapshot
 
 @dataclass
 class SnapshotDiff:
-    from_snapshot_id: int
-    to_snapshot_id: Optional[int]
-    new_running_tasks: Sequence[FormattedLiveTaskInfo]
-    still_running_tasks: Sequence[FormattedLiveTaskInfo]
-    finished_running_tasks: Sequence[FormattedLiveTaskInfo]
-    new_terminated_tasks: Sequence[FormattedTerminatedTaskInfo]
+    added: Sequence[FormattedLiveTaskInfo]
+    removed: Sequence[FormattedLiveTaskInfo]
+    common: Sequence[FormattedLiveTaskInfo]
+    from_snapshot_id: Optional[int] = None
+    to_snapshot_id: Optional[int] = None
+    added_terminated: Sequence[FormattedTerminatedTaskInfo] = field(
+        default_factory=list
+    )
+
+    @property
+    def new_running_tasks(self) -> Sequence[FormattedLiveTaskInfo]:
+        return self.added
+
+    @property
+    def still_running_tasks(self) -> Sequence[FormattedLiveTaskInfo]:
+        return self.common
+
+    @property
+    def finished_running_tasks(self) -> Sequence[FormattedLiveTaskInfo]:
+        return self.removed
+
+    @property
+    def new_terminated_tasks(self) -> Sequence[FormattedTerminatedTaskInfo]:
+        return self.added_terminated
 
     @property
     def added_running_tasks(self) -> Sequence[FormattedLiveTaskInfo]:
-        return self.new_running_tasks
+        return self.added
 
     @property
     def removed_running_tasks(self) -> Sequence[FormattedLiveTaskInfo]:
-        return self.finished_running_tasks
+        return self.removed
+
+    @property
+    def common_running_tasks(self) -> Sequence[FormattedLiveTaskInfo]:
+        return self.common
 
     @property
     def unchanged_running_tasks(self) -> Sequence[FormattedLiveTaskInfo]:
-        return self.still_running_tasks
+        return self.common
 
     @property
     def added_terminated_tasks(self) -> Sequence[FormattedTerminatedTaskInfo]:
-        return self.new_terminated_tasks
+        return self.added_terminated
+
+
+FormattedSnapshotDiff = SnapshotDiff
 
 
 class FormatItemTypes(StrEnum):

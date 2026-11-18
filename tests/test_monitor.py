@@ -364,3 +364,61 @@ async def test_max_snapshots(event_loop):
             mon.format_running_task_stack(999999999)
         with pytest.raises(KeyError):
             mon.format_terminated_task_stack("nonexistent")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_formatting_and_diff(event_loop):
+    async def sleeper():
+        await asyncio.sleep(100)
+
+    async def short_task():
+        await asyncio.sleep(0.01)
+
+    with Monitor(event_loop, console_enabled=False, hook_task_factory=True) as mon:
+        t1 = asyncio.create_task(sleeper(), name="task_one")
+        t2 = asyncio.create_task(sleeper(), name="task_two")
+        t3 = asyncio.create_task(short_task(), name="task_short")
+        await t3
+        await asyncio.sleep(0.05)
+
+        s0 = await mon.capture_snapshot("snap0")
+
+        running0 = mon.format_snapshot_task_list(s0, "", False)
+        assert any(t.name == "task_one" for t in running0)
+        assert any(t.name == "task_two" for t in running0)
+        filtered_running0 = mon.format_snapshot_task_list(s0, "task_one", False)
+        assert len(filtered_running0) == 1
+        assert filtered_running0[0].name == "task_one"
+
+        term0 = mon.format_snapshot_terminated_task_list(s0, "", False)
+        assert any(t.name == "task_short" for t in term0)
+
+        stack0 = mon.format_snapshot_task_stack(s0, id(t1))
+        assert len(stack0) >= 2
+        assert any(item.type == "header" for item in stack0)
+
+        t1.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await t1
+        t4 = asyncio.create_task(sleeper(), name="task_four")
+        await asyncio.sleep(0.05)
+
+        s1 = await mon.capture_snapshot("snap1")
+
+        # t1 is now terminated, but its stack in s0 should still be accessible
+        stack0_after = mon.format_snapshot_task_stack(s0, id(t1))
+        assert stack0_after == stack0
+
+        with pytest.raises(KeyError):
+            mon.format_snapshot_task_stack(s0, 999999999)
+
+        diff = mon.format_snapshot_diff(s0, s1)
+        assert any(t.name == "task_four" for t in diff.added)
+        assert any(t.name == "task_one" for t in diff.removed)
+        assert any(t.name == "task_two" for t in diff.common)
+
+        t2.cancel()
+        t4.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await t2
+            await t4

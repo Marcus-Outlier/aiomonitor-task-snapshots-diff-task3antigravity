@@ -331,11 +331,41 @@ class Monitor:
             Sequence[FormattedLiveTaskInfo],
             Sequence[FormattedTerminatedTaskInfo],
             Dict[str, TerminatedTaskInfo],
+            Dict[str, Sequence[FormattedStackItem]],
+            Dict[str, Sequence[FormattedStackItem]],
+            List[str],
+            List[str],
         ]:
             running = list(self.format_running_task_list("", False))
             terminated = list(self.format_terminated_task_list("", False))
             raw_terminated = dict(self._terminated_tasks)
-            return running, terminated, raw_terminated
+            running_stacks: Dict[str, Sequence[FormattedStackItem]] = {}
+            for t in running:
+                with contextlib.suppress(MissingTask):
+                    running_stacks[t.task_id] = list(
+                        self.format_running_task_stack(t.task_id)
+                    )
+            terminated_stacks: Dict[str, Sequence[FormattedStackItem]] = {}
+            for t in terminated:
+                with contextlib.suppress(MissingTask):
+                    terminated_stacks[t.task_id] = list(
+                        self.format_terminated_task_stack(t.task_id)
+                    )
+            persistent_running = [
+                t.task_id for t in self.format_running_task_list("", True)
+            ]
+            persistent_terminated = [
+                t.task_id for t in self.format_terminated_task_list("", True)
+            ]
+            return (
+                running,
+                terminated,
+                raw_terminated,
+                running_stacks,
+                terminated_stacks,
+                persistent_running,
+                persistent_terminated,
+            )
 
         try:
             running_loop = asyncio.get_running_loop()
@@ -343,12 +373,28 @@ class Monitor:
             running_loop = None
 
         if self._monitored_loop == running_loop or not self._monitored_loop.is_running():
-            running_tasks, terminated_tasks, raw_terminated_tasks = await _capture()
+            (
+                running_tasks,
+                terminated_tasks,
+                raw_terminated_tasks,
+                running_stacks,
+                terminated_stacks,
+                persistent_running,
+                persistent_terminated,
+            ) = await _capture()
         else:
             fut = asyncio.wrap_future(
                 asyncio.run_coroutine_threadsafe(_capture(), loop=self._monitored_loop)
             )
-            running_tasks, terminated_tasks, raw_terminated_tasks = await fut
+            (
+                running_tasks,
+                terminated_tasks,
+                raw_terminated_tasks,
+                running_stacks,
+                terminated_stacks,
+                persistent_running,
+                persistent_terminated,
+            ) = await fut
 
         snapshot_id = self._next_snapshot_id
         self._next_snapshot_id += 1
@@ -359,6 +405,10 @@ class Monitor:
             running_tasks=running_tasks,
             terminated_tasks=terminated_tasks,
             raw_terminated_tasks=raw_terminated_tasks,
+            running_task_stacks=running_stacks,
+            terminated_task_stacks=terminated_stacks,
+            persistent_running_task_ids=persistent_running,
+            persistent_terminated_task_ids=persistent_terminated,
         )
         self._snapshots[snapshot_id] = snapshot
         self._snapshot_history.append(snapshot_id)
@@ -389,43 +439,112 @@ class Monitor:
             for k in sorted(self._snapshots.keys())
         ]
 
-    def diff_snapshots(
+    def format_snapshot_task_list(
+        self,
+        snapshot_id: int | str,
+        filter_: str = "",
+        persistent: bool = False,
+    ) -> Sequence[FormattedLiveTaskInfo]:
+        snapshot = self.get_snapshot(snapshot_id)
+        persistent_ids = set(snapshot.persistent_running_task_ids)
+        tasks = []
+        for task in snapshot.running_tasks:
+            if persistent and task.task_id not in persistent_ids:
+                continue
+            if filter_ and (filter_ not in task.coro and filter_ not in task.name):
+                continue
+            tasks.append(task)
+        return tasks
+
+    def format_snapshot_terminated_task_list(
+        self,
+        snapshot_id: int | str,
+        filter_: str = "",
+        persistent: bool = False,
+    ) -> Sequence[FormattedTerminatedTaskInfo]:
+        snapshot = self.get_snapshot(snapshot_id)
+        persistent_ids = set(snapshot.persistent_terminated_task_ids)
+        tasks = []
+        for task in snapshot.terminated_tasks:
+            if persistent and task.task_id not in persistent_ids:
+                continue
+            if filter_ and (filter_ not in task.coro and filter_ not in task.name):
+                continue
+            tasks.append(task)
+        return tasks
+
+    def format_snapshot_task_stack(
+        self,
+        snapshot_id: int | str,
+        task_id: str | int,
+    ) -> Sequence[FormattedStackItem]:
+        snapshot = self.get_snapshot(snapshot_id)
+        tid = str(task_id)
+        if tid in snapshot.running_task_stacks:
+            return list(snapshot.running_task_stacks[tid])
+        if tid in snapshot.terminated_task_stacks:
+            return list(snapshot.terminated_task_stacks[tid])
+        raise MissingTask(task_id)
+
+    def format_snapshot_terminated_task_stack(
+        self,
+        snapshot_id: int | str,
+        trace_id: str,
+    ) -> Sequence[FormattedStackItem]:
+        snapshot = self.get_snapshot(snapshot_id)
+        if trace_id in snapshot.terminated_task_stacks:
+            return list(snapshot.terminated_task_stacks[trace_id])
+        raise MissingTask(trace_id)
+
+    def format_snapshot_diff(
         self,
         from_snapshot_id: int | str,
         to_snapshot_id: Optional[int | str] = None,
+        filter_: str = "",
+        persistent: bool = False,
     ) -> SnapshotDiff:
         snap_a = self.get_snapshot(from_snapshot_id)
+        a_running = self.format_snapshot_task_list(
+            from_snapshot_id, filter_, persistent
+        )
+        a_terminated = self.format_snapshot_terminated_task_list(
+            from_snapshot_id, filter_, persistent
+        )
         if to_snapshot_id is not None:
             snap_b = self.get_snapshot(to_snapshot_id)
             to_id: Optional[int] = snap_b.snapshot_id
-            b_running = snap_b.running_tasks
-            b_terminated = snap_b.terminated_tasks
+            b_running = self.format_snapshot_task_list(
+                to_snapshot_id, filter_, persistent
+            )
+            b_terminated = self.format_snapshot_terminated_task_list(
+                to_snapshot_id, filter_, persistent
+            )
         else:
             to_id = None
-            b_running = self.format_running_task_list("", False)
-            b_terminated = self.format_terminated_task_list("", False)
+            b_running = self.format_running_task_list(filter_, persistent)
+            b_terminated = self.format_terminated_task_list(filter_, persistent)
 
-        a_running_by_id = {t.task_id: t for t in snap_a.running_tasks}
+        a_running_by_id = {t.task_id: t for t in a_running}
         b_running_by_id = {t.task_id: t for t in b_running}
-        a_terminated_ids = {t.task_id for t in snap_a.terminated_tasks}
+        a_terminated_ids = {t.task_id for t in a_terminated}
 
-        new_running = [t for t in b_running if t.task_id not in a_running_by_id]
-        still_running = [t for t in b_running if t.task_id in a_running_by_id]
-        finished_running = [
-            t for t in snap_a.running_tasks if t.task_id not in b_running_by_id
-        ]
-        new_terminated = [
+        added = [t for t in b_running if t.task_id not in a_running_by_id]
+        common = [t for t in b_running if t.task_id in a_running_by_id]
+        removed = [t for t in a_running if t.task_id not in b_running_by_id]
+        added_terminated = [
             t for t in b_terminated if t.task_id not in a_terminated_ids
         ]
 
         return SnapshotDiff(
+            added=added,
+            removed=removed,
+            common=common,
             from_snapshot_id=snap_a.snapshot_id,
             to_snapshot_id=to_id,
-            new_running_tasks=new_running,
-            still_running_tasks=still_running,
-            finished_running_tasks=finished_running,
-            new_terminated_tasks=new_terminated,
+            added_terminated=added_terminated,
         )
+
+    diff_snapshots = format_snapshot_diff
 
     async def cancel_monitored_task(self, task_id: str | int) -> str:
         task_id_ = int(task_id)
